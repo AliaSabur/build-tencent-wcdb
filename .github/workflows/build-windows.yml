@@ -1,0 +1,80 @@
+name: build-windows
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure MSVC for amd64
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: amd64
+
+    - name: Add msbuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+
+    - name: Clone Tencent/wcdb
+      run: |
+        git clone https://github.com/Tencent/wcdb.git
+        cd wcdb
+        git submodule update --init sqlcipher zstd
+
+    - name: Apply local patches
+      shell: pwsh
+      run: |
+        Copy-Item windows-patch/FileManager.cpp  wcdb/src/common/base/FileManager.cpp  -Force
+
+    - name: Detect MSVC paths & build (Release)
+      shell: pwsh
+      run: |
+        $libPath      = (where.exe lib.exe      | Select-Object -First 1)
+        $vsDevCmdPath = (where.exe VsDevCmd.bat | Select-Object -First 1)
+
+        Write-Host "lib.exe       => $libPath"
+        Write-Host "VsDevCmd.bat  => $vsDevCmdPath"
+
+        $env:MSVC_BIN_HOST64_PATH = Split-Path (Split-Path $libPath -Parent) -Parent
+        $env:MSVC_TOOLS_PATH      = Split-Path $vsDevCmdPath -Parent
+
+        Write-Host "MSVC_BIN_HOST64_PATH = $env:MSVC_BIN_HOST64_PATH"
+        Write-Host "MSVC_TOOLS_PATH      = $env:MSVC_TOOLS_PATH"
+
+        Set-Location wcdb
+        cd src
+        mkdir build
+        cd build
+        cmake ".." -DBUILD_SHARED_LIBS=OFF -G "Visual Studio 17 2022" -T v143
+        cmake --build . --config Release
+        # -Recurse
+        Get-ChildItem -Path . 
+        # merge static
+        & "$libPath" /OUT:"Release\WCDB_merged.lib" Release\*.lib
+
+    - name: Package windows (header + lib)
+      shell: pwsh
+      run: |
+        Set-Location wcdb
+        mkdir -p package/headers
+        cp -r src/build/export_headers/* package/headers/
+        cp src/build/Release/*.lib package/
+        #
+        # zip -r ../Windows_out.zip package
+        Compress-Archive -Path .\package\* -DestinationPath "..\Windows_out.zip" -Force
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Windows_out
+        path: Windows_out.zip
+        retention-days: 1
